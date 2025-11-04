@@ -61,10 +61,19 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 // Start server
 async function startServer() {
   try {
-    // Connect to database
-    await connectDatabase();
+    // Try to connect to database (non-blocking)
+    try {
+      await connectDatabase();
+    } catch (dbError: any) {
+      console.error('⚠ MongoDB connection failed:', dbError.message);
+      console.log('⚠ Server will start without MongoDB - caching will be memory-only\n');
+      console.log('To fix MongoDB connection:');
+      console.log('1. Update MONGODB_URI in backend/.env with complete password');
+      console.log('2. Whitelist your IP in MongoDB Atlas (Network Access)');
+      console.log('3. Wait 2-3 minutes, then restart\n');
+    }
 
-    // Start listening
+    // Start listening (even if MongoDB failed)
     app.listen(config.port, () => {
       console.log(`
 ╔═══════════════════════════════════════════╗

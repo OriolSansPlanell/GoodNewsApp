@@ -35,24 +35,35 @@ export class NewsService {
       return cached;
     }
 
-    // Check database for recent articles
-    const dbArticles = await this.getFromDatabase(query);
+    // Check database for recent articles (if MongoDB is available)
+    let dbArticles: Article[] = [];
+    try {
+      dbArticles = await this.getFromDatabase(query);
 
-    if (dbArticles.length >= (query.limit || 20)) {
-      console.log(`Returning ${dbArticles.length} articles from database`);
-      const response = this.buildResponse(dbArticles, query);
-      this.cache.set(cacheKey, response);
-      return response;
+      if (dbArticles.length >= (query.limit || 20)) {
+        console.log(`Returning ${dbArticles.length} articles from database`);
+        const response = this.buildResponse(dbArticles, query);
+        this.cache.set(cacheKey, response);
+        return response;
+      }
+    } catch (error) {
+      console.log('Database unavailable, fetching fresh articles...');
     }
 
     // Fetch fresh articles from news sources
     console.log('Fetching fresh articles from news sources');
-    await this.fetchAndStoreNews(query);
+    const freshArticles = await this.fetchAndStoreNews(query);
 
-    // Get updated results from database
-    const updatedArticles = await this.getFromDatabase(query);
-    const response = this.buildResponse(updatedArticles, query);
+    // Try to get updated results from database, or use fresh articles
+    let articles: Article[] = [];
+    try {
+      articles = await this.getFromDatabase(query);
+    } catch (error) {
+      console.log('Using fresh articles (database unavailable)');
+      articles = freshArticles;
+    }
 
+    const response = this.buildResponse(articles, query);
     this.cache.set(cacheKey, response);
     return response;
   }
@@ -60,7 +71,7 @@ export class NewsService {
   /**
    * Fetch fresh news and store in database
    */
-  async fetchAndStoreNews(query: NewsQuery): Promise<void> {
+  async fetchAndStoreNews(query: NewsQuery): Promise<Article[]> {
     try {
       // Fetch raw articles from news sources
       const rawArticles = await this.newsAdapter.fetchNews(query);
@@ -76,8 +87,14 @@ export class NewsService {
 
       console.log(`${positiveArticles.length} articles passed positivity filter (>=${config.minPositivityScore})`);
 
-      // Store in database (upsert to avoid duplicates)
-      await this.storeArticles(positiveArticles);
+      // Store in database if available (upsert to avoid duplicates)
+      try {
+        await this.storeArticles(positiveArticles);
+      } catch (dbError) {
+        console.log('Could not store in database (using memory cache only)');
+      }
+
+      return positiveArticles;
     } catch (error) {
       console.error('Error fetching and storing news:', error);
       throw error;
@@ -179,27 +196,32 @@ export class NewsService {
    * Get topic statistics
    */
   async getTopicStats(): Promise<Record<string, number>> {
-    const stats = await ArticleModel.aggregate([
-      {
-        $match: {
-          positivityScore: { $gte: config.minPositivityScore }
+    try {
+      const stats = await ArticleModel.aggregate([
+        {
+          $match: {
+            positivityScore: { $gte: config.minPositivityScore }
+          }
+        },
+        {
+          $group: {
+            _id: '$topic',
+            count: { $sum: 1 },
+            avgPositivity: { $avg: '$positivityScore' }
+          }
         }
-      },
-      {
-        $group: {
-          _id: '$topic',
-          count: { $sum: 1 },
-          avgPositivity: { $avg: '$positivityScore' }
-        }
-      }
-    ]);
+      ]);
 
-    const result: Record<string, number> = {};
-    stats.forEach(stat => {
-      result[stat._id] = stat.count;
-    });
+      const result: Record<string, number> = {};
+      stats.forEach(stat => {
+        result[stat._id] = stat.count;
+      });
 
-    return result;
+      return result;
+    } catch (error) {
+      console.log('Database unavailable for topic stats');
+      return {}; // Return empty stats if database unavailable
+    }
   }
 
   /**
